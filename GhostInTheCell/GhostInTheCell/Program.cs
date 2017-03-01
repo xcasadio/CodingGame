@@ -106,6 +106,7 @@ public class Action
     public const string Wait = "WAIT";
     public const string Move = "MOVE";
     public const string Bomb = "BOMB";
+    public const string Increase = "INC";
 }
 
 public class Factory
@@ -117,7 +118,6 @@ public class Factory
 
     public Dictionary<int, int> Steps = new Dictionary<int, int>();
     public List<Tuple<int, int>> OrderedSteps = new List<Tuple<int, int>>();
-
 
     public bool NeedHelp;
     public int Weight;
@@ -196,49 +196,31 @@ public class Map
 
         var enemies = _factories
             .Where(f => f.Value.Owner != Owner.Player && f.Value.Production > 0)
-            .OrderByDescending(f => f.Value.Owner)
             .ToList();
 
-        //attack
         foreach (var source in myFactories)
         {
             if (source.Value.NbCyborgs == 0) continue;
 
-            if (FleeOrWait(source.Value, troops))
-            {
-                continue;
-            }
+            if (FleeOrWait(source.Value, troops)) continue;
 
-            var weightedEnemies = enemies
+            TryIncrease(source.Value);
+
+            var nearestEnemies = enemies
                 .OrderBy(f => source.Value.Steps[f.Value.Id])
+                .ThenBy(f => f.Value.NbCyborgs)
                 .ThenByDescending(f => f.Value.Owner)
                 .ToList();
 
-            if (weightedEnemies.Count == 0)
-            {
-                break;
-            }
+            var nbAttack = 0;
 
-            foreach (var enemy in weightedEnemies)
+            foreach (var enemy in nearestEnemies)
             {
-                if (source.Value.NbCyborgs == 0) break;
-                Attack(source.Value, enemy.Value, troops);
-            }
+                if (source.Value.NbCyborgs == 0 || nbAttack == 2) break;
 
-            //the factory will not attack ?
-            if (source.Value.NbCyborgs > 0
-                && (_actions.ContainsKey(source.Value.Id) == false
-                    || (_actions.ContainsKey(source.Value.Id) && _actions[source.Value.Id].Count == 0)))
-            {
-                var enemy = enemies
-                    .Select(f => f.Value)
-                    .OrderByDescending(f => f.Production)
-                    .ThenBy(f => source.Value.Steps[f.Id])
-                    .FirstOrDefault();
-
-                if (enemy != null)
+                if (Attack(source.Value, enemy.Value, troops, bombs))
                 {
-                    Attack(source.Value, enemy, troops, true);
+                    nbAttack++;
                 }
             }
         }
@@ -259,12 +241,22 @@ public class Map
         return Wait();
     }
 
+    private void TryIncrease(Factory factory)
+    {
+        if (factory.NbCyborgs >= 10 && factory.Production < 3)
+        {
+            if (_actions.ContainsKey(factory.Id) == false) _actions[factory.Id] = new List<string>();
+            _actions[factory.Id].Add(Increase(factory.Id));
+            factory.NbCyborgs -= 10;
+            factory.Production += 1;
+        }
+    }
+
     private bool FleeOrWait(Factory factory, List<Troop> troops)
     {
         var enemiesTroops = troops
             .Where(t =>
-                    t.Owner == Owner.Enemy && t.FactoryEnd == factory.Id &&
-                    t.Steps == 1)
+                    t.Owner == Owner.Enemy && t.FactoryEnd == factory.Id)
             .Sum(t => t.NbCyborgs);
 
         var playerTroops = troops
@@ -276,68 +268,93 @@ public class Map
             return false;
         }
 
-        var nearestPlayers = _factories
-            .Select(t => t.Value)
-            .Where(t => t.Owner == Owner.Player && t.Id != factory.Id)
-            .OrderBy(t => t.Steps[factory.Id])
-            .FirstOrDefault();
+        //var nearestPlayers = _factories
+        //    .Select(t => t.Value)
+        //    .Where(t => t.Owner == Owner.Player && t.Id != factory.Id)
+        //    .OrderBy(t => t.Steps[factory.Id])
+        //    .FirstOrDefault();
+        //
+        //if (nearestPlayers != null)
+        //{
+        //    if (_actions.ContainsKey(factory.Id) == false) _actions[factory.Id] = new List<string>();
+        //    _actions[factory.Id].Add(Move(factory.Id, nearestPlayers.Id, factory.NbCyborgs));
+        //
+        //    troops.Add(new Troop
+        //    {
+        //        FactoryStart = factory.Id,
+        //        FactoryEnd = nearestPlayers.Id,
+        //        NbCyborgs = factory.NbCyborgs,
+        //        Owner = Owner.Player,
+        //        Steps = factory.Steps[nearestPlayers.Id]
+        //    });
+        //    factory.NbCyborgs = 0;
+        //
+        //    return true;
+        //}
 
-        if (nearestPlayers != null)
-        {
-            if (_actions.ContainsKey(factory.Id) == false) _actions[factory.Id] = new List<string>();
-            _actions[factory.Id].Add(Move(factory.Id, nearestPlayers.Id, factory.NbCyborgs));
-
-            troops.Add(new Troop
-            {
-                FactoryStart = factory.Id,
-                FactoryEnd = nearestPlayers.Id,
-                NbCyborgs = factory.NbCyborgs,
-                Owner = Owner.Player,
-                Steps = factory.Steps[nearestPlayers.Id]
-            });
-            factory.NbCyborgs = 0;
-
-            return true;
-        }
-
-        return false;
+        return true;
     }
 
-    private void Attack(Factory source, Factory enemy, List<Troop> troops, bool force = false)
+    private bool Attack(Factory source, Factory enemy, List<Troop> troops, List<Bomb> bombs, bool force = false)
     {
         var enemiesTroops = troops
-                    .Where(
-                        t =>
+                    .Where(t =>
                             t.Owner == Owner.Enemy && t.FactoryEnd == enemy.Id &&
                             t.Steps <= source.Steps[enemy.Id]).ToList();
         var nbEnemyTroops = enemiesTroops.Sum(t => t.NbCyborgs);
         var production = enemy.Owner == Owner.Enemy ? enemy.Production * (source.Steps[enemy.Id] + 1) : 0;
-        var otherNbCyborgs = enemy.NbCyborgs + production + nbEnemyTroops;
+        var factor = enemy.Owner == Owner.Enemy ? 1 : -1;
+        var otherNbCyborgs = enemy.NbCyborgs + production + nbEnemyTroops * factor;
 
-        var playerTroops = troops
-            .Where(t => t.Owner == Owner.Player && t.FactoryEnd == enemy.Id)
-            .ToList();
-        var nbPlayerTroops = playerTroops.Sum(t => t.NbCyborgs);
+        var enemyId = enemy.Id;
 
-        if (force == false && (nbPlayerTroops - otherNbCyborgs > 0)) // attack will conquer the factory
+        //var playerTroops = troops
+        //    .Where(t => t.Owner == Owner.Player && t.FactoryEnd == enemy.Id)
+        //    .ToList();
+        //var nbPlayerTroops = playerTroops.Sum(t => t.NbCyborgs);
+        //
+        //if (force == false && (nbPlayerTroops - otherNbCyborgs > 0)) // attack will conquer the factory
+        //{
+        //    return;
+        //}
+        //
+        //var enemyId = enemy.Id;
+        ////Can find a owned factory near the enemy?
+        var nearestFriend = _factories
+            .Where(f => f.Value.Owner != Owner.Enemy && f.Value.Id != source.Id && _factories[enemyId].Steps.ContainsKey(enemyId))
+            .OrderBy(f => f.Value.Steps[enemyId]).ToList();
+
+        if (nearestFriend.Count > 0)
         {
-            return;
+            var friendFactory = nearestFriend.First().Value;
+            if (friendFactory.Steps[enemyId] < source.Steps[enemyId])
+            {
+                enemyId = friendFactory.Id;
+            }
         }
 
-        var totalCyborgs = otherNbCyborgs - nbPlayerTroops + 1;
+        //
+        var totalCyborgs = otherNbCyborgs /*- nbPlayerTroops*/ + 1;
         totalCyborgs = source.NbCyborgs - totalCyborgs < 0 ? source.NbCyborgs : totalCyborgs;
 
+        if (source.NbCyborgs < 2)
+        {
+            return false;
+        }
+
         if (_actions.ContainsKey(source.Id) == false) _actions[source.Id] = new List<string>();
-        _actions[source.Id].Add(Move(source.Id, enemy.Id, totalCyborgs));
+        _actions[source.Id].Add(Move(source.Id, enemyId, totalCyborgs));
         source.NbCyborgs -= totalCyborgs;
         troops.Add(new Troop
         {
             FactoryStart = source.Id,
-            FactoryEnd = enemy.Id,
+            FactoryEnd = enemyId,
             NbCyborgs = totalCyborgs,
             Owner = Owner.Player,
-            Steps = source.Steps[enemy.Id]
+            Steps = source.Steps[enemyId]
         });
+
+        return true;
     }
 
     private void TryToLaunchBomb(List<Bomb> bombs)
@@ -397,6 +414,11 @@ public class Map
     static string Bomb(int src, int dst)
     {
         return $"{Action.Bomb} {src} {dst}";
+    }
+
+    static string Increase(int id)
+    {
+        return $"{Action.Increase} {id}";
     }
 
     static string Wait()
