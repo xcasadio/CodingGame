@@ -24,7 +24,7 @@ class Player
             _map.AddLink(int.Parse(inputs[0]), int.Parse(inputs[1]), int.Parse(inputs[2]));
         }
 
-        _map.Initialize();
+        //_map.DebugLink();
 
         GameLoop();
     }
@@ -33,6 +33,7 @@ class Player
     {
         var troops = new List<Troop>();
         var bombs = new List<Bomb>();
+        var enemyBombs = new HashSet<int>();
 
         while (true)
         {
@@ -82,6 +83,15 @@ class Player
                 }
             }
 
+            _map.UpdateFactories(
+                bombs.Where(b => b.Owner == Owner.Enemy && enemyBombs.Contains(b.Id) == false).Count(),
+                enemyBombs.Where(b => bombs.Any(bomb => bomb.Id == b)).Count());
+
+            foreach (var bomb in bombs.Where(b => b.Owner == Owner.Enemy))
+            {
+                enemyBombs.Add(bomb.Id);
+            }            
+
             Console.WriteLine(_map.DoAction(troops, bombs));
         }
     }
@@ -117,10 +127,9 @@ public class Factory
     public int NbCyborgs;
 
     public Dictionary<int, int> Steps = new Dictionary<int, int>();
-    public List<Tuple<int, int>> OrderedSteps = new List<Tuple<int, int>>();
+    //public List<Tuple<int, int>> OrderedSteps = new List<Tuple<int, int>>();
 
-    public bool NeedHelp;
-    public int Weight;
+    public int BombWarning;
 }
 
 public class Troop
@@ -167,24 +176,19 @@ public class Map
         _factories[id2].Steps[id1] = step;
     }
 
-    internal void Initialize()
-    {
-        foreach (var factory in _factories.Values)
-        {
-            foreach (var o in factory.Steps.OrderBy(f => f.Value))
-            {
-                factory.OrderedSteps.Add(new Tuple<int, int>(o.Key, o.Value));
-            }
-        }
-    }
-
     public void UpdateFactory(int factoryId, int owner, int nbCyborgs, int productionNb)
     {
         _factories[factoryId].Owner = owner;
         _factories[factoryId].NbCyborgs = nbCyborgs;
         _factories[factoryId].Production = productionNb;
-        _factories[factoryId].NeedHelp = false;
-        _factories[factoryId].Weight = 0;
+    }
+
+    internal void UpdateFactories(int nbNewBomb, int nbBombExplosed)
+    {
+        foreach (var f in _factories.Where(f => f.Value.Owner == Owner.Player))
+        {
+            f.Value.BombWarning += nbNewBomb - nbBombExplosed;
+        }
     }
 
     internal string DoAction(List<Troop> troops, List<Bomb> bombs)
@@ -204,7 +208,10 @@ public class Map
 
             if (FleeOrWait(source.Value, troops)) continue;
 
-            TryIncrease(source.Value);
+            if (myFactories.Count > 2)
+            {
+                TryIncrease(source.Value);
+            }
 
             var nearestEnemies = enemies
                 .OrderBy(f => source.Value.Steps[f.Value.Id])
@@ -216,7 +223,7 @@ public class Map
 
             foreach (var enemy in nearestEnemies)
             {
-                if (source.Value.NbCyborgs == 0 || nbAttack == 2) break;
+                if (source.Value.NbCyborgs == 0 /*|| nbAttack == 2*/) break;
 
                 if (Attack(source.Value, enemy.Value, troops, bombs))
                 {
@@ -295,34 +302,40 @@ public class Map
         return true;
     }
 
-    private bool Attack(Factory source, Factory enemy, List<Troop> troops, List<Bomb> bombs, bool force = false)
+    private bool Attack(Factory source, Factory enemy, List<Troop> troops, List<Bomb> bombs)
     {
         var enemiesTroops = troops
-                    .Where(t =>
-                            t.Owner == Owner.Enemy && t.FactoryEnd == enemy.Id &&
-                            t.Steps <= source.Steps[enemy.Id]).ToList();
-        var nbEnemyTroops = enemiesTroops.Sum(t => t.NbCyborgs);
+                    .Where(t => t.Owner == Owner.Enemy
+                        && t.FactoryEnd == enemy.Id 
+                        && t.Steps <= source.Steps[enemy.Id])
+                    .FirstOrDefault();
+        var nbEnemyTroops = enemiesTroops != null ? enemiesTroops.NbCyborgs : 0;
         var production = enemy.Owner == Owner.Enemy ? enemy.Production * (source.Steps[enemy.Id] + 1) : 0;
         var factor = enemy.Owner == Owner.Enemy ? 1 : -1;
         var otherNbCyborgs = enemy.NbCyborgs + production + nbEnemyTroops * factor;
 
         var enemyId = enemy.Id;
 
-        //var playerTroops = troops
-        //    .Where(t => t.Owner == Owner.Player && t.FactoryEnd == enemy.Id)
-        //    .ToList();
-        //var nbPlayerTroops = playerTroops.Sum(t => t.NbCyborgs);
-        //
-        //if (force == false && (nbPlayerTroops - otherNbCyborgs > 0)) // attack will conquer the factory
-        //{
-        //    return;
-        //}
-        //
-        //var enemyId = enemy.Id;
-        ////Can find a owned factory near the enemy?
+        var playerTroops = troops
+            .Where(t => t.Owner == Owner.Player 
+                && t.FactoryEnd == enemy.Id
+                && t.Steps <= source.Steps[enemy.Id])
+            .ToList();
+        var nbPlayerTroops = playerTroops.Sum(t => t.NbCyborgs);
+        
+        if (nbPlayerTroops - otherNbCyborgs > 0) // attack will conquer the factory
+        {
+            return false;
+        }
+        
+        //Can find a owned factory near the enemy?
         var nearestFriend = _factories
-            .Where(f => f.Value.Owner != Owner.Enemy && f.Value.Id != source.Id && _factories[enemyId].Steps.ContainsKey(enemyId))
-            .OrderBy(f => f.Value.Steps[enemyId]).ToList();
+            .Where(f => f.Value.Owner == Owner.Player 
+                && f.Value.Id != source.Id 
+                && f.Value.Id != enemyId 
+                && f.Value.Steps[enemyId] < source.Steps[enemyId])
+            .OrderBy(f => f.Value.Steps[source.Id])
+            .ToList();
 
         if (nearestFriend.Count > 0)
         {
@@ -336,11 +349,6 @@ public class Map
         //
         var totalCyborgs = otherNbCyborgs /*- nbPlayerTroops*/ + 1;
         totalCyborgs = source.NbCyborgs - totalCyborgs < 0 ? source.NbCyborgs : totalCyborgs;
-
-        if (source.NbCyborgs < 2)
-        {
-            return false;
-        }
 
         if (_actions.ContainsKey(source.Id) == false) _actions[source.Id] = new List<string>();
         _actions[source.Id].Add(Move(source.Id, enemyId, totalCyborgs));
@@ -424,5 +432,16 @@ public class Map
     static string Wait()
     {
         return $"{Action.Wait}";
+    }
+
+    internal void DebugLink()
+    {
+        foreach (var f in _factories)
+        {
+            foreach (var s in f.Value.Steps)
+            {
+                Console.Error.WriteLine($"{f.Value.Id}->{s.Key}={s.Value}");
+            }            
+        }
     }
 }
